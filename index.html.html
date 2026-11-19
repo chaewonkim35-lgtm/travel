@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>랜덤 국내 여행지</title>
+<style>
+  body { font-family: sans-serif; text-align: center; padding: 40px; background: #f5f7fa; }
+  button { font-size: 1.2rem; padding: 12px 28px; border: 0; border-radius: 8px;
+           background: #2f80ed; color: #fff; cursor: pointer; }
+  button:disabled { background: #aaa; }
+  .pass { background: #e05555; font-size: 1rem; padding: 10px 20px; margin-top: 16px; }
+  .reset { background: #888; font-size: 0.9rem; padding: 8px 14px; margin-left: 8px; }
+  .card { margin: 30px auto; max-width: 480px; padding: 24px; background: #fff;
+          border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.1); text-align: left; }
+  .card img { max-width: 100%; border-radius: 8px; margin-bottom: 12px; }
+  .card h2 { text-align: center; }
+  .card ul { padding-left: 20px; line-height: 1.8; }
+  .card .info { text-align: center; }
+  .card .pass-wrap { text-align: center; }
+  small { color: #888; }
+  .subtitle { color: #555; margin-top: -10px; }
+</style>
+</head>
+<body>
+
+<h1>🎲 오늘의 여행지</h1>
+<p class="subtitle">182개의 지역과 788개의 여행지 중에서 찾은 나만의 비밀 랜덤 여행지입니다</p>
+<button id="btn">랜덤 추천</button>
+<button id="resetBtn" class="reset">제외 목록 초기화</button>
+<div class="card" id="result">버튼을 눌러보세요</div>
+
+<script>
+// ===== 인증키 두 개를 붙여넣으세요 =====
+const API_KEY = "8b3d43c2efb50f47319452016bdb87a4f678109bf65307156900acc2849ec30d";
+const KAKAO_KEY = "1f4fbfa80b01533c90a52a40ae88359c";
+// ======================================
+
+const API_URL = "https://apis.data.go.kr/B551011/KorService2/areaBasedList2";
+const areaCodes = [1, 2, 3, 4, 5, 6, 7, 8, 31, 32, 33, 34, 35, 36, 37, 38, 39];
+
+const shortSido = {
+  "서울특별시": "서울", "부산광역시": "부산", "대구광역시": "대구",
+  "인천광역시": "인천", "광주광역시": "광주", "대전광역시": "대전",
+  "울산광역시": "울산", "세종특별자치시": "세종", "경기도": "경기",
+  "강원특별자치도": "강원", "강원도": "강원", "충청북도": "충북",
+  "충청남도": "충남", "전북특별자치도": "전북", "전라북도": "전북",
+  "전라남도": "전남", "경상북도": "경북", "경상남도": "경남",
+  "제주특별자치도": "제주"
+};
+
+// 제외 목록 (브라우저에 저장)
+const EXCLUDE_KEY = "excludedRegions";
+let excluded = JSON.parse(localStorage.getItem(EXCLUDE_KEY) || "[]");
+let currentRegion = null;
+
+function saveExcluded() {
+  localStorage.setItem(EXCLUDE_KEY, JSON.stringify(excluded));
+}
+
+const resultBox = document.getElementById("result");
+const btn = document.getElementById("btn");
+const resetBtn = document.getElementById("resetBtn");
+
+// 내 위치 (권한이 없으면 서울시청 기준)
+let here = { lat: 37.5665, lng: 126.9780 };
+let usingDefault = true;
+navigator.geolocation.getCurrentPosition(
+  pos => {
+    here = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+    usingDefault = false;
+  },
+  () => {},
+  { timeout: 8000 }
+);
+
+// 직선거리 (도로 거리 조회가 실패했을 때 사용)
+function distanceKm(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2 +
+            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+// 카카오 길찾기 API로 자동차 도로 거리와 시간 가져오기
+async function getRoadRoute(fromLat, fromLng, toLat, toLng) {
+  const url = `https://apis-navi.kakaomobility.com/v1/directions` +
+              `?origin=${fromLng},${fromLat}&destination=${toLng},${toLat}&priority=RECOMMEND`;
+  const response = await fetch(url, {
+    headers: { Authorization: `KakaoAK ${KAKAO_KEY}` }
+  });
+  if (!response.ok) throw new Error("길찾기 요청 실패");
+
+  const data = await response.json();
+  const route = data.routes[0];
+  if (route.result_code !== 0) throw new Error("경로를 찾지 못했습니다");
+
+  return {
+    km: Math.round(route.summary.distance / 100) / 10,   // 미터 → 킬로미터 (소수 첫째 자리)
+    minutes: Math.round(route.summary.duration / 60)      // 초 → 분
+  };
+}
+
+function getRegionName(addr) {
+  const parts = addr.split(" ");
+  const sido = shortSido[parts[0]] || parts[0];
+  if (sido === "세종") return "세종";
+  return `${sido} ${parts[1] || ""}`.trim();
+}
+
+async function fetchArea(areaCode) {
+  const params = new URLSearchParams({
+    serviceKey: API_KEY,
+    MobileOS: "ETC",
+    MobileApp: "RandomTravel",
+    _type: "json",
+    areaCode: areaCode,
+    contentTypeId: 12,
+    numOfRows: 100,
+    pageNo: 1,
+    arrange: "A"
+  });
+
+  const response = await fetch(API_URL + "?" + params.toString());
+  const data = await response.json();
+  const items = data.response.body.items.item;
+  if (!items) return [];
+  return Array.isArray(items) ? items : [items];
+}
+
+async function getRegionGroups() {
+  const lists = await Promise.all(areaCodes.map(fetchArea));
+  const all = lists.flat().filter(item => item.mapx && item.mapy && item.addr1);
+
+  const groups = {};
+  for (const item of all) {
+    const region = getRegionName(item.addr1);
+    if (!groups[region]) groups[region] = [];
+    groups[region].push(item);
+  }
+  return Object.entries(groups).filter(([name]) => !excluded.includes(name));
+}
+
+// 랜덤 추천 버튼
+btn.addEventListener("click", async () => {
+  btn.disabled = true;
+  resultBox.innerHTML = "추천 중... ⏳";
+
+  try {
+    const groups = await getRegionGroups();
+    if (groups.length === 0) {
+      throw new Error(excluded.length > 0
+        ? "추천할 지역이 남아 있지 않아요. 제외 목록을 초기화해 주세요."
+        : "관광지 정보를 찾지 못했습니다.");
+    }
+
+    const [regionName, places] = groups[Math.floor(Math.random() * groups.length)];
+    currentRegion = regionName;
+
+    const centerLat = places.reduce((sum, p) => sum + Number(p.mapy), 0) / places.length;
+    const centerLng = places.reduce((sum, p) => sum + Number(p.mapx), 0) / places.length;
+
+    // 도로 거리 조회 (실패하면 직선거리로 대신 표시)
+    let distanceText;
+    try {
+      const route = await getRoadRoute(here.lat, here.lng, centerLat, centerLng);
+      const h = Math.floor(route.minutes / 60);
+      const m = route.minutes % 60;
+      const timeText = h > 0 ? `${h}시간 ${m}분` : `${m}분`;
+      distanceText = `🚗 자동차로 약 ${route.km.toLocaleString()}km · 약 ${timeText}<br>
+        <small>고속도로 등을 포함한 추천 경로 기준</small>`;
+    } catch (routeError) {
+      const km = Math.round(distanceKm(here.lat, here.lng, centerLat, centerLng));
+      distanceText = `🧭 직선거리 약 ${km.toLocaleString()}km<br>
+        <small>도로 거리를 불러오지 못해 직선거리로 표시했어요</small>`;
+    }
+
+    const photo = places.find(p => p.firstimage);
+    const image = photo ? `<img src="${photo.firstimage}" alt="${regionName}">` : "";
+
+    const list = places.slice(0, 10).map(p => `<li>${p.title}</li>`).join("");
+    const more = places.length > 10 ? `<small>외 ${places.length - 10}곳</small>` : "";
+
+    resultBox.innerHTML = `
+      ${image}
+      <h2>📍 ${regionName}</h2>
+      <p class="info">${distanceText}</p>
+      <p><b>이곳의 관광지 (${places.length}곳)</b></p>
+      <ul>${list}</ul>
+      ${more}
+      <div class="pass-wrap">
+        <button id="passBtn" class="pass">여긴 패스</button>
+      </div>
+      ${usingDefault ? "<small>위치 권한이 없어 서울 기준으로 계산했어요</small>" : ""}
+    `;
+
+    document.getElementById("passBtn").addEventListener("click", () => {
+      if (!currentRegion) return;
+      if (!excluded.includes(currentRegion)) excluded.push(currentRegion);
+      saveExcluded();
+      resultBox.innerHTML = `🚫 <b>${currentRegion}</b> 은(는) 추천에서 제외했어요.<br>
+        <small>현재 제외한 지역: ${excluded.length}곳</small>`;
+      currentRegion = null;
+    });
+  } catch (error) {
+    resultBox.innerHTML = `❌ 오류가 발생했어요<br><small>${error.message}</small><br>
+      <small>인증키가 맞는지, 승인이 끝났는지 확인해 주세요.</small>`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// 제외 목록 초기화 버튼
+resetBtn.addEventListener("click", () => {
+  if (excluded.length === 0) {
+    alert("제외한 지역이 없어요.");
+    return;
+  }
+  if (confirm(`제외한 지역 ${excluded.length}곳을 모두 다시 추천 대상에 넣을까요?`)) {
+    excluded = [];
+    saveExcluded();
+    resultBox.innerHTML = "제외 목록을 초기화했어요. 랜덤 추천을 눌러보세요.";
+  }
+});
+</script>
+
+</body>
+</html>
